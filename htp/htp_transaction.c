@@ -757,6 +757,7 @@ htp_status_t htp_tx_res_set_headers_clear(htp_tx_t *tx) {
 }
 
 void htp_connp_destroy_decompressors(htp_connp_t *connp) {
+#ifdef HAVE_ZLIB
     htp_decompressor_t *comp = connp->out_decompressor;
     while (comp) {
         htp_decompressor_t *next = comp->next;
@@ -764,6 +765,7 @@ void htp_connp_destroy_decompressors(htp_connp_t *connp) {
         comp = next;
     }
     connp->out_decompressor = NULL;
+#endif
 }
 
 /** \internal
@@ -824,6 +826,7 @@ htp_status_t htp_tx_res_process_body_data_ex(htp_tx_t *tx, const void *data, siz
     tx->response_message_len += d.len;
 
     switch (tx->response_content_encoding_processing) {
+#ifdef HAVE_ZLIB
         case HTP_COMPRESSION_GZIP:
         case HTP_COMPRESSION_DEFLATE:
             // In severe memory stress these could be NULL
@@ -838,6 +841,7 @@ htp_status_t htp_tx_res_process_body_data_ex(htp_tx_t *tx, const void *data, siz
                 htp_tx_res_destroy_decompressors(tx);
             }
             break;
+#endif
 
         case HTP_COMPRESSION_NONE:
             // When there's no decompression, response_entity_len.
