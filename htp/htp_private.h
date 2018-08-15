@@ -51,7 +51,9 @@ extern "C" {
 
 #include <ctype.h>
 #include <errno.h>
+#ifdef HAVE_ICONV
 #include <iconv.h>
+#endif
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -203,8 +205,10 @@ htp_status_t htp_ch_multipart_callback_request_headers(htp_tx_t *tx);
 
 htp_status_t htp_php_parameter_processor(htp_param_t *p);
 
+#ifdef HAVE_ICONV
 int htp_transcode_params(htp_connp_t *connp, htp_table_t **params, int destroy_old);
 int htp_transcode_bstr(iconv_t cd, bstr *input, bstr **output);
+#endif
 
 int htp_parse_single_cookie_v0(htp_connp_t *connp, unsigned char *data, size_t len);
 int htp_parse_cookies_v0(htp_connp_t *connp);

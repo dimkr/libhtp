@@ -776,7 +776,9 @@ static void htp_tx_res_destroy_decompressors(htp_tx_t *tx) {
     htp_connp_destroy_decompressors(tx->connp);
 }
 
-static htp_status_t htp_tx_res_process_body_data_decompressor_callback(htp_tx_data_t *d) {
+#ifdef HAVE_ZLIB
+
+static htp_status_t htp_tx_res_process_body_data_gzip_decompressor_callback(htp_tx_data_t *d) {
     if (d == NULL) return HTP_ERROR;
 
     #if HTP_DEBUG
@@ -792,6 +794,8 @@ static htp_status_t htp_tx_res_process_body_data_decompressor_callback(htp_tx_da
 
     return HTP_OK;
 }
+
+#endif
 
 htp_status_t htp_tx_res_process_body_data(htp_tx_t *tx, const void *data, size_t len) {
     if ((tx == NULL) || (data == NULL)) return HTP_ERROR;
@@ -1215,15 +1219,20 @@ htp_status_t htp_tx_state_response_headers(htp_tx_t *tx) {
 
         /* normal case */
         if (!ce_multi_comp) {
+#ifdef HAVE_ZLIB
             tx->connp->out_decompressor = htp_gzip_decompressor_create(tx->connp, tx->response_content_encoding_processing);
             if (tx->connp->out_decompressor == NULL) return HTP_ERROR;
 
-            tx->connp->out_decompressor->callback = htp_tx_res_process_body_data_decompressor_callback;
-
+            tx->connp->out_decompressor->callback = htp_tx_res_process_body_data_gzip_decompressor_callback;
+#else
+            return HTP_ERROR;
+#endif
         /* multiple ce value case */
         } else {
             int layers = 0;
+#ifdef HAVE_ZLIB
             htp_decompressor_t *comp = NULL;
+#endif
 
             uint8_t *tok = NULL;
             size_t tok_len = 0;
@@ -1277,22 +1286,26 @@ htp_status_t htp_tx_state_response_headers(htp_tx_t *tx) {
                 }
 
                 if (cetype != HTP_COMPRESSION_NONE) {
+#ifdef HAVE_ZLIB
                     if (comp == NULL) {
                         tx->response_content_encoding_processing = cetype;
                         tx->connp->out_decompressor = htp_gzip_decompressor_create(tx->connp, tx->response_content_encoding_processing);
                         if (tx->connp->out_decompressor == NULL) {
                             return HTP_ERROR;
                         }
-                        tx->connp->out_decompressor->callback = htp_tx_res_process_body_data_decompressor_callback;
+                        tx->connp->out_decompressor->callback = htp_tx_res_process_body_data_gzip_decompressor_callback;
                         comp = tx->connp->out_decompressor;
                     } else {
                         comp->next = htp_gzip_decompressor_create(tx->connp, cetype);
                         if (comp->next == NULL) {
                             return HTP_ERROR;
                         }
-                        comp->next->callback = htp_tx_res_process_body_data_decompressor_callback;
+                        comp->next->callback = htp_tx_res_process_body_data_gzip_decompressor_callback;
                         comp = comp->next;
                     }
+#else
+                    return HTP_ERROR;
+#endif
                 }
 
                 if ((tok_len + 1) >= input_len)

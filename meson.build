@@ -69,8 +69,16 @@ endif
 
 deps = []
 
-zlib = dependency('zlib', required: false)
-if zlib.found()
+# check for zlib without using dependency(), which relies on pkg-config: many
+# embedded toolchains don't have pkg-config and .pc files
+code = '''
+#include <stddef.h>
+#include <zlib.h>
+int main() { inflate(NULL, 0); return 0; }
+'''
+zlib = cc.find_library('z', required: false)
+if zlib.found() and cc.links(code, args: '-lz', name: 'inflate')
+	cflags += ['-DHAVE_LIBZ=1']
 	deps += [zlib]
 endif
 
@@ -81,7 +89,7 @@ htp_version_h = configure_file(input: 'htp/htp_version.h.in',
                                output: 'htp_version.h',
                                configuration : conf)
 
-libhtp_includes = [include_directories('.')]
+libhtp_includes = [include_directories('.'), include_directories('htp')]
 libhtp = library('htp',
                  c_sources,
                  c_args: cflags,

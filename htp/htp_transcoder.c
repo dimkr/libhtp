@@ -47,6 +47,7 @@
  * @param[in] params
  * @param[in] destroy_old
  */
+#ifdef HAVE_ICONV
 int htp_transcode_params(htp_connp_t *connp, htp_table_t **params, int destroy_old) {
     htp_table_t *input_params = *params;
 
@@ -132,6 +133,7 @@ int htp_transcode_params(htp_connp_t *connp, htp_table_t **params, int destroy_o
 
     return HTP_OK;
 }
+#endif
 
 /**
  * Transcode one bstr.
@@ -140,6 +142,7 @@ int htp_transcode_params(htp_connp_t *connp, htp_table_t **params, int destroy_o
  * @param[in] input
  * @param[in] output
  */
+#ifdef HAVE_ICONV
 int htp_transcode_bstr(iconv_t cd, bstr *input, bstr **output) {
     // Reset conversion state for every new string
     iconv(cd, NULL, 0, NULL, 0);
@@ -209,3 +212,4 @@ int htp_transcode_bstr(iconv_t cd, bstr *input, bstr **output) {
 
     return HTP_OK;
 }
+#endif
