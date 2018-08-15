@@ -79,6 +79,11 @@ struct htp_decompressor_gzip_t {
 
 htp_decompressor_t *htp_gzip_decompressor_create(htp_connp_t *connp, enum htp_content_encoding_t format);
 
+#else
+
+/* placeholder for future support for other algorithms */
+typedef void *htp_decompressor_t;
+
 #endif
 
 #ifdef __cplusplus
