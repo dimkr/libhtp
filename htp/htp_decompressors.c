@@ -40,6 +40,8 @@
 
 #include "htp_private.h"
 
+#ifdef HAVE_ZLIB
+
 /**
  *  @brief See if the header has extensions
  *  @return number of bytes to skip
@@ -397,3 +399,5 @@ htp_decompressor_t *htp_gzip_decompressor_create(htp_connp_t *connp, enum htp_co
 
     return (htp_decompressor_t *) drec;
 }
+
+#endif
