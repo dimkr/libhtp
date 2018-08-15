@@ -43,6 +43,8 @@
 extern "C" {
 #endif
 
+#ifdef HAVE_ZLIB
+
 #include <zlib.h>
 
 typedef struct htp_decompressor_gzip_t htp_decompressor_gzip_t;
@@ -76,6 +78,8 @@ struct htp_decompressor_gzip_t {
 };
 
 htp_decompressor_t *htp_gzip_decompressor_create(htp_connp_t *connp, enum htp_content_encoding_t format);
+
+#endif
 
 #ifdef __cplusplus
 }
