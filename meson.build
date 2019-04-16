@@ -13,24 +13,15 @@ c_sources = [
 	'htp/bstr.c', 'htp/bstr_builder.c', 'htp/htp_base64.c', 'htp/htp_config.c', 'htp/htp_connection.c', 'htp/htp_connection_parser.c',
 	'htp/htp_content_handlers.c', 'htp/htp_cookies.c', 'htp/htp_decompressors.c', 'htp/htp_hooks.c', 'htp/htp_list.c', 'htp/htp_multipart.c', 'htp/htp_parsers.c',
 	'htp/htp_php.c', 'htp/htp_request.c', 'htp/htp_request_apache_2_2.c', 'htp/htp_request_generic.c', 'htp/htp_request_parsers.c', 'htp/htp_response.c',
-	'htp/htp_response_generic.c', 'htp/htp_table.c', 'htp/htp_transaction.c', 'htp/htp_transcoder.c', 'htp/htp_urlencoded.c', 'htp/htp_util.c', 'htp/htp_utf8_decoder.c',
-	'htp/strlcpy.c', 'htp/strlcat.c'
+	'htp/htp_response_generic.c', 'htp/htp_table.c', 'htp/htp_transaction.c', 'htp/htp_transcoder.c', 'htp/htp_urlencoded.c', 'htp/htp_util.c', 'htp/htp_utf8_decoder.c'
 ]
 
 if get_option('debug')
 	cflags += ['-DHTP_DEBUG']
 endif
 
-if get_option('debug')
-	cflags += ['-DHTP_DEBUG']
-endif
-
 if get_option('devmode')
-	cflags += ['-Werror',  '-Wfatal-errors']
-endif
-
-if get_option('devmode')
-	cflags += ['-Werror',  '-Wfatal-errors']
+	cflags += ['-Werror', '-Wfatal-errors']
 
 	args = [['-fstack-protector'], ['-Wstrict-overflow=1'], ['-D_FORTIFY_SOURCE=2'], ['-Wformat', '-Wformat-security']]
 	foreach args:
@@ -54,6 +45,8 @@ foreach pair: [
 ]
 	if cc.has_function(pair[0], prefix: '#include <@0@>'.format(pair[1]))
 		cflags += ['-DHAVE_@0@=1'.format(pair[0].to_upper())]
+	else
+		c_sources += ['htp/@0@.c'.format(pair[0])]
 	endif
 endforeach
 
