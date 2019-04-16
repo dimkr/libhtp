@@ -16,11 +16,11 @@ c_sources = [
 	'htp/htp_response_generic.c', 'htp/htp_table.c', 'htp/htp_transaction.c', 'htp/htp_transcoder.c', 'htp/htp_urlencoded.c', 'htp/htp_util.c', 'htp/htp_utf8_decoder.c'
 ]
 
-if get_option('debug')
+if get_option('libhtp_debug')
 	cflags += ['-DHTP_DEBUG']
 endif
 
-if get_option('devmode')
+if get_option('libhtp_devmode')
 	cflags += ['-Werror', '-Wfatal-errors']
 
 	args = [['-fstack-protector'], ['-Wstrict-overflow=1'], ['-D_FORTIFY_SOURCE=2'], ['-Wformat', '-Wformat-security']]
@@ -50,7 +50,7 @@ foreach pair: [
 	endif
 endforeach
 
-if cc.has_function('iconv', prefix: '#include <iconv.h>')
+if get_option('libhtp_iconv') and cc.has_function('iconv', prefix: '#include <iconv.h>')
 	cflags += ['-DHAVE_ICONV=1']
 
 	code = '''#include <iconv.h>

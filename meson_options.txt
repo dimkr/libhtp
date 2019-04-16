@@ -1,2 +1,3 @@
-option('debug', type: 'boolean', value: false)
-option('devmode', type: 'boolean', value: false)
+option('libhtp_debug', type: 'boolean', value: false)
+option('libhtp_devmode', type: 'boolean', value: false)
+option('libhtp_iconv', type: 'boolean')
