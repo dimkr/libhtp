@@ -329,7 +329,6 @@ htp_status_t htp_connp_REQ_CONNECT_PROBE_DATA(htp_connp_t *connp) {
     unsigned char *data;
     size_t len;
     if (htp_connp_req_consolidate_data(connp, &data, &len) != HTP_OK) {
-        fprintf(stderr, "htp_connp_req_consolidate_data fail");
         return HTP_ERROR;
     }
 #ifdef HTP_DEBUG
@@ -358,7 +357,7 @@ htp_status_t htp_connp_REQ_CONNECT_PROBE_DATA(htp_connp_t *connp) {
 #ifdef HTP_DEBUG
         fprint_raw_data(stderr, "htp_connp_REQ_CONNECT_PROBE_DATA: tunnel contains plain text HTTP", data, len);
 #endif
-        connp->in_state = htp_connp_REQ_FINALIZE;
+        return htp_tx_state_request_complete(connp->in_tx);
     } else {
 #ifdef HTP_DEBUG
         fprint_raw_data(stderr, "htp_connp_REQ_CONNECT_PROBE_DATA: tunnel is not HTTP", data, len);
@@ -615,6 +614,23 @@ htp_status_t htp_connp_REQ_BODY_DETERMINE(htp_connp_t *connp) {
  */
 htp_status_t htp_connp_REQ_HEADERS(htp_connp_t *connp) {
     for (;;) {
+        if (connp->in_status == HTP_STREAM_CLOSED) {
+            // Parse previous header, if any.
+            if (connp->in_header != NULL) {
+                if (connp->cfg->process_request_header(connp, bstr_ptr(connp->in_header),
+                                                       bstr_len(connp->in_header)) != HTP_OK)
+                    return HTP_ERROR;
+                bstr_free(connp->in_header);
+                connp->in_header = NULL;
+            }
+
+            htp_connp_req_clear_buffer(connp);
+
+            connp->in_tx->request_progress = HTP_REQUEST_TRAILER;
+
+            // We've seen all the request headers.
+            return htp_tx_state_request_headers(connp->in_tx);
+        }
         IN_COPY_BYTE_OR_RETURN(connp);
 
         // Have we reached the end of the line?
@@ -715,6 +731,26 @@ htp_status_t htp_connp_REQ_PROTOCOL(htp_connp_t *connp) {
         connp->in_state = htp_connp_REQ_HEADERS;
         connp->in_tx->request_progress = HTP_REQUEST_HEADERS;
     } else {
+        // Let's check if the protocol was simply missing
+        int64_t pos = connp->in_current_read_offset;
+        int afterspaces = 0;
+        // Probe if data looks like a header line
+        while (pos < connp->in_current_len) {
+            if (connp->in_current_data[pos] == ':') {
+                htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Request line: missing protocol");
+                connp->in_tx->is_protocol_0_9 = 0;
+                // Switch to request header parsing.
+                connp->in_state = htp_connp_REQ_HEADERS;
+                connp->in_tx->request_progress = HTP_REQUEST_HEADERS;
+                return HTP_OK;
+            } else if (htp_is_lws(connp->in_current_data[pos])) {
+                // Allows spaces after header name
+                afterspaces = 1;
+            } else if (htp_is_space(connp->in_current_data[pos]) || afterspaces == 1) {
+                break;
+            }
+            pos++;
+        }
         // We're done with this request.
         connp->in_state = htp_connp_REQ_FINALIZE;
     }
@@ -792,6 +828,40 @@ htp_status_t htp_connp_REQ_LINE(htp_connp_t *connp) {
 }
 
 htp_status_t htp_connp_REQ_FINALIZE(htp_connp_t *connp) {
+    size_t bytes_left = connp->in_current_len - connp->in_current_read_offset;
+
+    if (bytes_left > 0) {
+        // If we have more bytes
+        // Either it is request pipelining
+        // Or we interpret it as body data
+        int64_t pos = connp->in_current_read_offset;
+        int64_t mstart = 0;
+        // skip past leading whitespace. IIS allows this
+        while ((pos < connp->in_current_len) && htp_is_space(connp->in_current_data[pos]))
+            pos++;
+        if (pos < connp->in_current_len) {
+            mstart = pos;
+            // The request method starts at the beginning of the
+            // line and ends with the first whitespace character.
+            while ((pos < connp->in_current_len) && (!htp_is_space(connp->in_current_data[pos])))
+                pos++;
+
+            int methodi = HTP_M_UNKNOWN;
+            bstr *method = bstr_dup_mem(connp->in_current_data + mstart, pos - mstart);
+            if (method) {
+                methodi = htp_convert_method_to_number(method);
+                bstr_free(method);
+            }
+            if (methodi == HTP_M_UNKNOWN) {
+                // Interpret remaining bytes as body data
+                htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Unexpected request body");
+                connp->in_tx->request_progress = HTP_REQUEST_BODY;
+                connp->in_state = htp_connp_REQ_BODY_IDENTITY;
+                connp->in_body_data_left = bytes_left;
+                return HTP_OK;
+            }
+        }
+    }
     return htp_tx_state_request_complete(connp->in_tx);
 }
 

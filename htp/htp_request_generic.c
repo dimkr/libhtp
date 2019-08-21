@@ -70,27 +70,55 @@ htp_status_t htp_process_request_header_generic(htp_connp_t *connp, unsigned cha
     if (h_existing != NULL) {
         // TODO Do we want to have a list of the headers that are
         //      allowed to be combined in this way?
-
-        // Add to the existing header.
-        bstr *new_value = bstr_expand(h_existing->value, bstr_len(h_existing->value) + 2 + bstr_len(h->value));
-        if (new_value == NULL) {
-            bstr_free(h->name);
-            bstr_free(h->value);
-            free(h);
-            return HTP_ERROR;
+        if ((h_existing->flags & HTP_FIELD_REPEATED) == 0) {
+            // This is the second occurence for this header.
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Repetition for header");
+        } else {
+            // For simplicity reasons, we count the repetitions of all headers
+            if (connp->in_tx->req_header_repetitions < HTP_MAX_HEADERS_REPETITIONS) {
+                connp->in_tx->req_header_repetitions++;
+            } else {
+                bstr_free(h->name);
+                bstr_free(h->value);
+                free(h);
+                return HTP_OK;
+            }
         }
+        // Keep track of repeated same-name headers.
+        h_existing->flags |= HTP_FIELD_REPEATED;
 
-        h_existing->value = new_value;
-        bstr_add_mem_noex(h_existing->value, ", ", 2);
-        bstr_add_noex(h_existing->value, h->value);
+        // Having multiple C-L headers is against the RFC but
+        // servers may ignore the subsequent headers if the values are the same.
+        if (bstr_cmp_c_nocase(h->name, "Content-Length") == 0) {
+            // Don't use string comparison here because we want to
+            // ignore small formatting differences.
+
+            int64_t existing_cl = htp_parse_content_length(h_existing->value);
+            int64_t new_cl = htp_parse_content_length(h->value);
+            // Ambiguous response C-L value.
+            if ((existing_cl == -1) || (new_cl == -1) || (existing_cl != new_cl)) {
+                htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Ambiguous request C-L value");
+            }
+            // Ignoring the new C-L header that has the same value as the previous ones.
+        } else {
+            // Add to the existing header.
+            bstr *new_value = bstr_expand(h_existing->value, bstr_len(h_existing->value) + 2 + bstr_len(h->value));
+            if (new_value == NULL) {
+                bstr_free(h->name);
+                bstr_free(h->value);
+                free(h);
+                return HTP_ERROR;
+            }
+
+            h_existing->value = new_value;
+            bstr_add_mem_noex(h_existing->value, ", ", 2);
+            bstr_add_noex(h_existing->value, h->value);
+        }
 
         // The new header structure is no longer needed.
         bstr_free(h->name);
         bstr_free(h->value);
         free(h);
-
-        // Keep track of repeated same-name headers.
-        h_existing->flags |= HTP_FIELD_REPEATED;
     } else {
         // Add as a new header.
         if (htp_table_add(connp->in_tx->request_headers, h->name, h) != HTP_OK) {
@@ -315,9 +343,12 @@ htp_status_t htp_parse_request_line_generic_ex(htp_connp_t *connp, int nul_termi
         }
         pos++;
     }
+// Too much performance overhead for fuzzing
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     if (bad_delim) {
         htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Request line: non-compliant delimiter between Method and URI");
     }
+#endif
 
     // Is there anything after the request method?
     if (pos == len) {
@@ -325,6 +356,8 @@ htp_status_t htp_parse_request_line_generic_ex(htp_connp_t *connp, int nul_termi
 
         tx->is_protocol_0_9 = 1;
         tx->request_protocol_number = HTP_PROTOCOL_0_9;
+        if (tx->request_method_number == HTP_M_UNKNOWN)
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Request line: unknown method only");
 
         return HTP_OK;
     }
@@ -347,10 +380,13 @@ htp_status_t htp_parse_request_line_generic_ex(htp_connp_t *connp, int nul_termi
         pos = start;
         while ((pos < len) && (!htp_is_space(data[pos]))) pos++;
     }
+// Too much performance overhead for fuzzing
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     if (bad_delim) {
         // warn regardless if we've seen non-compliant chars
         htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Request line: URI contains non-compliant delimiter");
     }
+#endif
 
     tx->request_uri = bstr_dup_mem(data + start, pos - start);
     if (tx->request_uri == NULL) return HTP_ERROR;
@@ -368,6 +404,8 @@ htp_status_t htp_parse_request_line_generic_ex(htp_connp_t *connp, int nul_termi
 
         tx->is_protocol_0_9 = 1;
         tx->request_protocol_number = HTP_PROTOCOL_0_9;
+        if (tx->request_method_number == HTP_M_UNKNOWN)
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Request line: unknown method and no protocol");
 
         return HTP_OK;
     }
@@ -377,6 +415,8 @@ htp_status_t htp_parse_request_line_generic_ex(htp_connp_t *connp, int nul_termi
     if (tx->request_protocol == NULL) return HTP_ERROR;
 
     tx->request_protocol_number = htp_parse_protocol(tx->request_protocol);
+    if (tx->request_method_number == HTP_M_UNKNOWN && tx->request_protocol_number == HTP_PROTOCOL_INVALID)
+        htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Request line: unknown method and invalid protocol");
 
     #ifdef HTP_DEBUG
     fprint_raw_data(stderr, __func__, bstr_ptr(tx->request_protocol), bstr_len(tx->request_protocol));

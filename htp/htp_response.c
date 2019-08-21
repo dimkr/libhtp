@@ -419,7 +419,7 @@ htp_status_t htp_connp_RES_BODY_CHUNKED_LENGTH(htp_connp_t *connp) {
                 connp->out_tx->response_transfer_coding = HTP_CODING_IDENTITY;
 
                 htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0,
-                        "Response chunk encoding: Invalid chunk length: %d",
+                        "Response chunk encoding: Invalid chunk length: "PRId64"",
                         connp->out_chunked_length);
                 return HTP_OK;
             }
@@ -633,7 +633,7 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
         // 2. If a Transfer-Encoding header field (section 14.40) is present and
         //   indicates that the "chunked" transfer coding has been applied, then
         //   the length is defined by the chunked encoding (section 3.6).
-        if ((te != NULL) && (bstr_index_of_c_nocase(te->value, "chunked") != -1)) {
+        if ((te != NULL) && (bstr_index_of_c_nocasenorzero(te->value, "chunked") != -1)) {
             if (bstr_cmp_c_nocase(te->value, "chunked") != 0) {
                 htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0,
                         "Transfer-encoding has abnormal chunked value");
@@ -671,7 +671,7 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
             // Get body length
             connp->out_tx->response_content_length = htp_parse_content_length(cl->value);
             if (connp->out_tx->response_content_length < 0) {
-                htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0, "Invalid C-L field in response: %d",
+                htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0, "Invalid C-L field in response: "PRId64"",
                         connp->out_tx->response_content_length);
                 return HTP_ERROR;
             } else {
@@ -728,6 +728,18 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
  */
 htp_status_t htp_connp_RES_HEADERS(htp_connp_t *connp) {
     for (;;) {
+        if (connp->out_status == HTP_STREAM_CLOSED) {
+            // Finalize sending raw trailer data.
+            htp_status_t rc = htp_connp_res_receiver_finalize_clear(connp);
+            if (rc != HTP_OK) return rc;
+
+            // Run hook response_TRAILER.
+            rc = htp_hook_run_all(connp->cfg->hook_response_trailer, connp->out_tx);
+            if (rc != HTP_OK) return rc;
+
+            connp->out_state = htp_connp_RES_FINALIZE;
+            return HTP_OK;
+        }
         OUT_COPY_BYTE_OR_RETURN(connp);
 
         // Have we reached the end of the line?

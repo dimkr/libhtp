@@ -116,7 +116,7 @@ int htp_is_token(int c) {
 }
 
 /**
- * Remove all line terminators (LF or CRLF) from
+ * Remove all line terminators (LF, CR or CRLF) from
  * the end of the line provided as input.
  *
  * @return 0 if nothing was removed, 1 if one or more LF characters were removed, or
@@ -139,6 +139,9 @@ int htp_chomp(unsigned char *data, size_t *len) {
                 (*len)--;
                 r = 2;
             }
+        } else if (data[*len - 1] == CR) {
+            (*len)--;
+            r = 1;
         } else return r;
     }
 
@@ -425,7 +428,7 @@ int htp_connp_is_line_folded(unsigned char *data, size_t len) {
 }
 
 int htp_is_folding_char(int c) {
-    if (htp_is_lws(c)) return 1;
+    if (htp_is_lws(c) || c == 0) return 1;
     else return 0;
 }
 
@@ -451,6 +454,13 @@ int htp_connp_is_line_terminator(htp_connp_t *connp, unsigned char *data, size_t
             // Treat an empty line as terminator
             if (htp_is_line_empty(data, len)) {
                 return 1;
+            }
+            // Only space is terminator if terminator does not follow right away
+            if (len == 2 && htp_is_lws(data[0]) && data[1] == LF) {
+                if (connp->out_current_read_offset < connp->out_current_len &&
+                    connp->out_current_data[connp->out_current_read_offset] != LF) {
+                    return 1;
+                }
             }
             break;
     }

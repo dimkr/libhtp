@@ -38,12 +38,18 @@ static int HTPCallbackResponse(htp_tx_t *out_tx) {
 static int HTPCallbackRequestHeaderData(htp_tx_data_t *tx_data)
 {
     fprintf(logfile, "HTPCallbackRequestHeaderData %"PRIuMAX"\n", (uintmax_t)tx_data->len);
+    if (tx_data->len > 0) {
+        fprintf(logfile, "HTPCallbackRequestHeaderData %x %x\n", tx_data->data[0], tx_data->data[(uintmax_t)tx_data->len-1]);
+    }
     return 0;
 }
 
 static int HTPCallbackResponseHeaderData(htp_tx_data_t *tx_data)
 {
     fprintf(logfile, "HTPCallbackResponseHeaderData %"PRIuMAX"\n", (uintmax_t)tx_data->len);
+    if (tx_data->len > 0) {
+        fprintf(logfile, "HTPCallbackResponseHeaderData %x %x\n", tx_data->data[0], tx_data->data[(uintmax_t)tx_data->len-1]);
+    }
     return 0;
 }
 
@@ -62,12 +68,18 @@ static int HTPCallbackResponseHasTrailer(htp_tx_t *tx)
 static int HTPCallbackRequestBodyData(htp_tx_data_t *tx_data)
 {
     fprintf(logfile, "HTPCallbackRequestBodyData %"PRIuMAX"\n", (uintmax_t)tx_data->len);
+    if (tx_data->len > 0) {
+        fprintf(logfile, "HTPCallbackRequestBodyData %x %x\n", tx_data->data[0], tx_data->data[(uintmax_t)tx_data->len-1]);
+    }
     return 0;
 }
 
 static int HTPCallbackResponseBodyData(htp_tx_data_t *tx_data)
 {
     fprintf(logfile, "HTPCallbackResponseBodyData %"PRIuMAX"\n", (uintmax_t)tx_data->len);
+    if (tx_data->len > 0) {
+        fprintf(logfile, "HTPCallbackResponseBodyData %x %x\n", tx_data->data[0], tx_data->data[(uintmax_t)tx_data->len-1]);
+    }
     return 0;
 }
 
@@ -220,6 +232,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
         htp_connp_res_data(connp, NULL, out_data + out_data_offset, out_data_len - out_data_offset);
     }
 
+    htp_connp_close(connp, NULL);
     htp_connp_destroy_all(connp);
     // Destroy LibHTP configuration    
     htp_config_destroy(cfg);

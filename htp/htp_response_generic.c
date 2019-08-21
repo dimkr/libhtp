@@ -171,9 +171,9 @@ htp_status_t htp_parse_response_header_generic(htp_connp_t *connp, htp_header_t 
 
         name_end = colon_pos;
 
-        // Ignore LWS after field-name.
+        // Ignore unprintable after field-name.
         prev = name_end;
-        while ((prev > name_start) && (htp_is_lws(data[prev - 1]))) {
+        while ((prev > name_start) && (data[prev - 1] <= 0x20)) {
             prev--;
             name_end--;
 
@@ -214,6 +214,12 @@ htp_status_t htp_parse_response_header_generic(htp_connp_t *connp, htp_header_t 
         }
 
         i++;
+    }
+    for (i = value_start; i < value_end; i++) {
+        if (data[i] == 0) {
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Response header value contains null.");
+            break;
+        }
     }
 
     // Now extract the name and the value.
@@ -256,8 +262,22 @@ htp_status_t htp_process_response_header_generic(htp_connp_t *connp, unsigned ch
     htp_header_t *h_existing = htp_table_get(connp->out_tx->response_headers, h->name);
     if (h_existing != NULL) {
         // Keep track of repeated same-name headers.
+        if ((h_existing->flags & HTP_FIELD_REPEATED) == 0) {
+            // This is the second occurence for this header.
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Repetition for header");
+        } else {
+            // For simplicity reasons, we count the repetitions of all headers
+            if (connp->out_tx->res_header_repetitions < HTP_MAX_HEADERS_REPETITIONS) {
+                connp->out_tx->res_header_repetitions++;
+            } else {
+                bstr_free(h->name);
+                bstr_free(h->value);
+                free(h);
+                return HTP_OK;
+            }
+        }
         h_existing->flags |= HTP_FIELD_REPEATED;
-                
+
         // Having multiple C-L headers is against the RFC but many
         // browsers ignore the subsequent headers if the values are the same.
         if (bstr_cmp_c_nocase(h->name, "Content-Length") == 0) {
@@ -270,13 +290,7 @@ htp_status_t htp_process_response_header_generic(htp_connp_t *connp, unsigned ch
             new_cl = htp_parse_content_length(h->value);
             if ((existing_cl == -1) || (new_cl == -1) || (existing_cl != new_cl)) {
                 // Ambiguous response C-L value.
-                htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0, "Ambiguous response C-L value");
-
-                bstr_free(h->name);
-                bstr_free(h->value);
-                free(h);
-                
-                return HTP_ERROR;
+                htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Ambiguous response C-L value");
             }
 
             // Ignoring the new C-L header that has the same value as the previous ones.
