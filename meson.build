@@ -82,6 +82,9 @@ htp_version_h = configure_file(input: 'htp/htp_version.h.in',
                                output: 'htp_version.h',
                                configuration : conf)
 
+htp_config_auto_gen_h = configure_file(output: 'htp_config_auto_gen.h',
+                                       configuration : configuration_data())
+
 libhtp_includes = [include_directories('.'), include_directories('htp')]
 libhtp = library('htp',
                  c_sources,
