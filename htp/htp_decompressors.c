@@ -41,9 +41,13 @@
 #include "htp_private.h"
 
 
+#ifdef HAVE_LZMA
+
 static void *SzAlloc(ISzAllocPtr p, size_t size) { return malloc(size); }
 static void SzFree(ISzAllocPtr p, void *address) { free(address); }
 const ISzAlloc lzma_Alloc = { SzAlloc, SzFree };
+
+#endif
 
 
 #ifdef HAVE_ZLIB
@@ -167,9 +171,13 @@ restart:
  * @param[in] drec
  */
 static void htp_gzip_decompressor_end(htp_decompressor_gzip_t *drec) {
+#ifdef HAVE_LZMA
     if (drec->zlib_initialized == HTP_COMPRESSION_LZMA) {
         LzmaDec_Free(&drec->state, &lzma_Alloc);
         drec->zlib_initialized = 0;
+#else
+    if (0) {
+#endif
     } else if (drec->zlib_initialized) {
         inflateEnd(&drec->stream);
         drec->zlib_initialized = 0;
@@ -268,6 +276,7 @@ restart:
             drec->stream.avail_out = GZIP_BUF_SIZE;
         }
 
+#ifdef HAVE_LZMA
         if (drec->zlib_initialized == HTP_COMPRESSION_LZMA) {
             if (drec->header_len < LZMA_PROPS_SIZE + 8) {
                 consumed = LZMA_PROPS_SIZE + 8 - drec->header_len;
@@ -311,6 +320,9 @@ restart:
                         rc = Z_DATA_ERROR;
                 }
             }
+#else
+        if (0) {
+#endif
         } else if (drec->zlib_initialized) {
             rc = inflate(&drec->stream, Z_NO_FLUSH);
         } else {
@@ -356,11 +368,15 @@ restart:
         }
         else if (rc != Z_OK) {
             htp_log(d->tx->connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "GZip decompressor: inflate failed with %d", rc);
+#ifdef HAVE_LZMA
             if (drec->zlib_initialized == HTP_COMPRESSION_LZMA) {
                 LzmaDec_Free(&drec->state, &lzma_Alloc);
                 // so as to clean zlib ressources after restart
                 drec->zlib_initialized = HTP_COMPRESSION_NONE;
             } else {
+#else
+            if (1) {
+#endif
                 inflateEnd(&drec->stream);
             }
 
@@ -440,6 +456,7 @@ htp_decompressor_t *htp_gzip_decompressor_create(htp_connp_t *connp, enum htp_co
     int rc;
 
     switch (format) {
+#ifdef HAVE_LZMA
         case HTP_COMPRESSION_LZMA:
             if (connp->cfg->lzma_memlimit > 0) {
                 LzmaDec_Construct(&drec->state);
@@ -449,6 +466,7 @@ htp_decompressor_t *htp_gzip_decompressor_create(htp_connp_t *connp, enum htp_co
             }
             rc = Z_OK;
             break;
+#endif
         case HTP_COMPRESSION_DEFLATE:
             // Negative values activate raw processing,
             // which is what we need for deflate.
