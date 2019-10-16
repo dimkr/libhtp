@@ -421,7 +421,7 @@ static htp_status_t htp_tx_process_request_headers(htp_tx_t *tx) {
         }
 
         // Get the body length.
-        tx->request_content_length = htp_parse_content_length(cl->value);
+        tx->request_content_length = htp_parse_content_length(cl->value, tx->connp);
         if (tx->request_content_length < 0) {
             tx->request_transfer_coding = HTP_CODING_INVALID;
             tx->flags |= HTP_REQUEST_INVALID_C_L;
@@ -793,6 +793,13 @@ static htp_status_t htp_tx_res_process_body_data_gzip_decompressor_callback(htp_
     // Invoke all callbacks.
     htp_status_t rc = htp_res_run_hook_body_data(d->tx->connp, d);
     if (rc != HTP_OK) return HTP_ERROR;
+    if (d->tx->response_entity_len > d->tx->connp->cfg->compression_bomb_limit &&
+        d->tx->response_entity_len > HTP_COMPRESSION_BOMB_RATIO * d->tx->response_message_len) {
+        htp_log(d->tx->connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0,
+                "Compression bomb: decompressed %"PRId64" bytes out of %"PRId64,
+                d->tx->response_entity_len, d->tx->response_message_len);
+        return HTP_ERROR;
+    }
 
     return HTP_OK;
 }
@@ -829,6 +836,7 @@ htp_status_t htp_tx_res_process_body_data_ex(htp_tx_t *tx, const void *data, siz
 #ifdef HAVE_ZLIB
         case HTP_COMPRESSION_GZIP:
         case HTP_COMPRESSION_DEFLATE:
+        case HTP_COMPRESSION_LZMA:
             // In severe memory stress these could be NULL
             if (tx->connp->out_decompressor == NULL || tx->connp->out_decompressor->decompress == NULL)
                 return HTP_ERROR;
@@ -1180,6 +1188,8 @@ htp_status_t htp_tx_state_response_headers(htp_tx_t *tx) {
         } else if ((bstr_cmp_c_nocasenorzero(ce->value, "deflate") == 0) ||
                    (bstr_cmp_c_nocasenorzero(ce->value, "x-deflate") == 0)) {
             tx->response_content_encoding = HTP_COMPRESSION_DEFLATE;
+        } else if (bstr_cmp_c_nocasenorzero(ce->value, "lzma") == 0) {
+            tx->response_content_encoding = HTP_COMPRESSION_LZMA;
         } else if (bstr_cmp_c_nocasenorzero(ce->value, "inflate") == 0) {
             // ignore
         } else {
@@ -1217,6 +1227,7 @@ htp_status_t htp_tx_state_response_headers(htp_tx_t *tx) {
     //    supported algorithms.
     if ((tx->response_content_encoding_processing == HTP_COMPRESSION_GZIP) ||
         (tx->response_content_encoding_processing == HTP_COMPRESSION_DEFLATE) ||
+        (tx->response_content_encoding_processing == HTP_COMPRESSION_LZMA) ||
          ce_multi_comp)
     {
         if (tx->connp->out_decompressor != NULL) {
@@ -1283,6 +1294,8 @@ htp_status_t htp_tx_state_response_headers(htp_tx_t *tx) {
                                 "C-E deflate has abnormal value");
                     }
                     cetype = HTP_COMPRESSION_DEFLATE;
+                } else if (bstr_util_cmp_mem(tok, tok_len, "lzma", 4) == 0) {
+                    cetype = HTP_COMPRESSION_LZMA;
                 } else if (bstr_util_cmp_mem(tok, tok_len, "inflate", 7) == 0) {
                     cetype = HTP_COMPRESSION_NONE;
                 } else {

@@ -212,15 +212,15 @@ int htp_convert_method_to_number(bstr *method) {
 }
 
 /**
- * Is the given line empty? This function expects the line to have
- * a terminating LF.
+ * Is the given line empty?
  *
  * @param[in] data
  * @param[in] len
  * @return 0 or 1
  */
 int htp_is_line_empty(unsigned char *data, size_t len) {
-    if ((len == 1) || ((len == 2) && (data[0] == CR))) {
+    if ((len == 1) ||
+        ((len == 2) && (data[0] == CR) && (data[1] == LF))) {
         return 1;
     }
 
@@ -253,8 +253,32 @@ int htp_is_line_whitespace(unsigned char *data, size_t len) {
  * @param[in] b
  * @return Content-Length as a number, or -1 on error.
  */
-int64_t htp_parse_content_length(bstr *b) {
-    return htp_parse_positive_integer_whitespace((unsigned char *) bstr_ptr(b), bstr_len(b), 10);
+int64_t htp_parse_content_length(bstr *b, htp_connp_t *connp) {
+    size_t len = bstr_len(b);
+    unsigned char * data = (unsigned char *) bstr_ptr(b);
+    size_t pos = 0;
+    int64_t r = 0;
+
+    if (len == 0) return -1003;
+
+    // Ignore junk before
+    while ((pos < len) && (data[pos] < '0' || data[pos] > '9')) {
+        if (!htp_is_lws(data[pos]) && connp != NULL && r == 0) {
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0,
+                    "C-L value with extra data in the beginnning");
+            r = -1;
+        }
+        pos++;
+    }
+    if (pos == len) return -1001;
+
+    r = bstr_util_mem_to_pint(data + pos, len - pos, 10, &pos);
+    // Ok to have junk afterwards
+    if (pos < len && connp != NULL) {
+        htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0,
+                "C-L value with extra data in the end");
+    }
+    return r;
 }
 
 /**
@@ -2376,14 +2400,17 @@ int htp_treat_response_line_as_body(const uint8_t *data, size_t len) {
     //      Firefox 3.5.x: (?i)^\s*http
     //      IE: (?i)^\s*http\s*/
     //      Safari: ^HTTP/\d+\.\d+\s+\d{3}
+    size_t pos = 0;
 
     if (data == NULL) return 1;
-    if (len < 4) return 1;
+    while ((pos < len) && (htp_is_space(data[pos]) || data[pos] == 0)) pos++;
 
-    if ((data[0] != 'H') && (data[0] != 'h')) return 1;
-    if ((data[1] != 'T') && (data[1] != 't')) return 1;
-    if ((data[2] != 'T') && (data[2] != 't')) return 1;
-    if ((data[3] != 'P') && (data[3] != 'p')) return 1;
+    if (len < pos + 4) return 1;
+
+    if ((data[pos] != 'H') && (data[pos] != 'h')) return 1;
+    if ((data[pos+1] != 'T') && (data[pos+1] != 't')) return 1;
+    if ((data[pos+2] != 'T') && (data[pos+2] != 't')) return 1;
+    if ((data[pos+3] != 'P') && (data[pos+3] != 'p')) return 1;
 
     return 0;
 }

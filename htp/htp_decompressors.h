@@ -46,6 +46,7 @@ extern "C" {
 #ifdef HAVE_ZLIB
 
 #include <zlib.h>
+#include "lzma/LzmaDec.h"
 
 typedef struct htp_decompressor_gzip_t htp_decompressor_gzip_t;
 typedef struct htp_decompressor_t htp_decompressor_t;
@@ -68,11 +69,12 @@ struct htp_decompressor_gzip_t {
     int initialized;
     #endif
     int zlib_initialized;
-    uint8_t header[10];
-    uint8_t header_len;
     uint8_t restart;    /**< deflate restarted to try rfc1950 instead of 1951 */
     uint8_t passthrough;    /**< decompression failed, pass through raw data */
     z_stream stream;
+    uint8_t header[LZMA_PROPS_SIZE + 8];
+    uint8_t header_len;
+    CLzmaDec state;
     unsigned char *buffer;
     unsigned long crc;    
 };

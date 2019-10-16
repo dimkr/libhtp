@@ -1696,7 +1696,7 @@ TEST_F(ConnectionParsing, ResponseMultipleClMismatch) {
 
 TEST_F(ConnectionParsing, ResponseInvalidCl) {
     int rc = test_run(home, "75-response-invalid-cl.t", cfg, &connp);
-    ASSERT_LT(rc, 0); // Expect error.
+    ASSERT_GE(rc, 0);
 
     ASSERT_EQ(1, htp_list_size(connp->conn->transactions));
 
@@ -1704,7 +1704,7 @@ TEST_F(ConnectionParsing, ResponseInvalidCl) {
     ASSERT_TRUE(tx != NULL);
 
     ASSERT_EQ(HTP_REQUEST_COMPLETE, tx->request_progress);
-    ASSERT_EQ(HTP_RESPONSE_HEADERS, tx->response_progress);
+    ASSERT_EQ(HTP_RESPONSE_COMPLETE, tx->response_progress);
 
     ASSERT_FALSE(tx->flags & HTP_REQUEST_SMUGGLING);
 }
@@ -2013,3 +2013,22 @@ TEST_F(ConnectionParsing, CompressedResponseGzipAsDeflate) {
 
     ASSERT_EQ(225, tx->response_entity_len);
 }
+
+#ifdef HAVE_LIBLZMA
+TEST_F(ConnectionParsing, CompressedResponseLzma) {
+    int rc = test_run(home, "96-compressed-response-lzma.t", cfg, &connp);
+
+    ASSERT_GE(rc, 0);
+
+    ASSERT_EQ(1, htp_list_size(connp->conn->transactions));
+
+    htp_tx_t *tx = (htp_tx_t *) htp_list_get(connp->conn->transactions, 0);
+    ASSERT_TRUE(tx != NULL);
+
+    ASSERT_TRUE(htp_tx_is_complete(tx));
+
+    ASSERT_EQ(90, tx->response_message_len);
+
+    ASSERT_EQ(68, tx->response_entity_len);
+}
+#endif

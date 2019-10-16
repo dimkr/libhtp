@@ -40,6 +40,12 @@
 
 #include "htp_private.h"
 
+
+static void *SzAlloc(ISzAllocPtr p, size_t size) { return malloc(size); }
+static void SzFree(ISzAllocPtr p, void *address) { free(address); }
+const ISzAlloc lzma_Alloc = { SzAlloc, SzFree };
+
+
 #ifdef HAVE_ZLIB
 
 /**
@@ -156,6 +162,21 @@ restart:
 }
 
 /**
+ * Ends decompressor.
+ *
+ * @param[in] drec
+ */
+static void htp_gzip_decompressor_end(htp_decompressor_gzip_t *drec) {
+    if (drec->zlib_initialized == HTP_COMPRESSION_LZMA) {
+        LzmaDec_Free(&drec->state, &lzma_Alloc);
+        drec->zlib_initialized = 0;
+    } else if (drec->zlib_initialized) {
+        inflateEnd(&drec->stream);
+        drec->zlib_initialized = 0;
+    }
+}
+
+/**
  * Decompress a chunk of gzip-compressed data.
  * If we have more than one decompressor, call this function recursively.
  *
@@ -166,6 +187,7 @@ restart:
 static htp_status_t htp_gzip_decompressor_decompress(htp_decompressor_gzip_t *drec, htp_tx_data_t *d) {
     size_t consumed = 0;
     int rc = 0;
+    htp_status_t callback_rc;
 
     // Pass-through the NULL chunk, which indicates the end of the stream.
 
@@ -176,7 +198,7 @@ static htp_status_t htp_gzip_decompressor_decompress(htp_decompressor_gzip_t *dr
         d2.len = d->len;
         d2.is_last = d->is_last;
 
-        htp_status_t callback_rc = drec->super.callback(&d2);
+        callback_rc = drec->super.callback(&d2);
         if (callback_rc != HTP_OK) {
             return HTP_ERROR;
         }
@@ -188,18 +210,21 @@ static htp_status_t htp_gzip_decompressor_decompress(htp_decompressor_gzip_t *dr
         // Prepare data for callback.
         htp_tx_data_t dout;
         dout.tx = d->tx;
-        dout.data = NULL;
-        dout.len = 0;
+        // This is last call, so output uncompressed data so far
+        dout.len = GZIP_BUF_SIZE - drec->stream.avail_out;
+        if (dout.len > 0) {
+            dout.data = drec->buffer;
+        } else {
+            dout.data = NULL;
+        }
         dout.is_last = d->is_last;
         if (drec->super.next != NULL && drec->zlib_initialized) {
             return htp_gzip_decompressor_decompress((htp_decompressor_gzip_t *)drec->super.next, &dout);
         } else {
             // Send decompressed data to the callback.
-            htp_status_t callback_rc = drec->super.callback(&dout);
+            callback_rc = drec->super.callback(&dout);
             if (callback_rc != HTP_OK) {
-                inflateEnd(&drec->stream);
-                drec->zlib_initialized = 0;
-
+                htp_gzip_decompressor_end(drec);
                 return callback_rc;
             }
         }
@@ -228,31 +253,77 @@ restart:
             d2.len = GZIP_BUF_SIZE;
             d2.is_last = d->is_last;
 
-            //if (drec->super.next != NULL) {
             if (drec->super.next != NULL && drec->zlib_initialized) {
-                htp_tx_data_t d3;
-                d3.tx = d->tx;
-                d3.data = drec->buffer;
-                d3.len = GZIP_BUF_SIZE;
-                d3.is_last = d->is_last;
-                return htp_gzip_decompressor_decompress((htp_decompressor_gzip_t *)drec->super.next, &d3);
+                callback_rc = htp_gzip_decompressor_decompress((htp_decompressor_gzip_t *)drec->super.next, &d2);
             } else {
                 // Send decompressed data to callback.
-                htp_status_t callback_rc = drec->super.callback(&d2);
-                if (callback_rc != HTP_OK) {
-                    inflateEnd(&drec->stream);
-                    drec->zlib_initialized = 0;
-
-                    return callback_rc;
-                }
+                callback_rc = drec->super.callback(&d2);
+            }
+            if (callback_rc != HTP_OK) {
+                htp_gzip_decompressor_end(drec);
+                return callback_rc;
             }
 
             drec->stream.next_out = drec->buffer;
             drec->stream.avail_out = GZIP_BUF_SIZE;
         }
 
-        if (drec->zlib_initialized) {
+        if (drec->zlib_initialized == HTP_COMPRESSION_LZMA) {
+            if (drec->header_len < LZMA_PROPS_SIZE + 8) {
+                consumed = LZMA_PROPS_SIZE + 8 - drec->header_len;
+                if (consumed > drec->stream.avail_in) {
+                    consumed = drec->stream.avail_in;
+                }
+                memcpy(drec->header + drec->header_len, drec->stream.next_in, consumed);
+                drec->stream.next_in = (unsigned char *) (d->data + consumed);
+                drec->stream.avail_in = d->len - consumed;
+                drec->header_len += consumed;
+            }
+            if (drec->header_len == LZMA_PROPS_SIZE + 8) {
+                rc = LzmaDec_Allocate(&drec->state, drec->header, LZMA_PROPS_SIZE, &lzma_Alloc);
+                if (rc != SZ_OK)
+                    return rc;
+                LzmaDec_Init(&drec->state);
+                // hacky to get to next step end retry allocate in case of failure
+                drec->header_len++;
+            }
+            if (drec->header_len > LZMA_PROPS_SIZE + 8) {
+                size_t inprocessed = drec->stream.avail_in;
+                size_t outprocessed = drec->stream.avail_out;
+                ELzmaStatus status;
+                rc = LzmaDec_DecodeToBuf(&drec->state, drec->stream.next_out, &outprocessed,
+                                          drec->stream.next_in, &inprocessed, LZMA_FINISH_ANY, &status, d->tx->cfg->lzma_memlimit);
+                drec->stream.avail_in -= inprocessed;
+                drec->stream.next_in += inprocessed;
+                drec->stream.avail_out -= outprocessed;
+                drec->stream.next_out += outprocessed;
+                switch (rc) {
+                    case SZ_OK:
+                        rc = Z_OK;
+                        if (status == LZMA_STATUS_FINISHED_WITH_MARK) {
+                            rc = Z_STREAM_END;
+                        }
+                        break;
+                    case SZ_ERROR_MEM:
+                        htp_log(d->tx->connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "LZMA decompressor: memory limit reached");
+                        // fall through
+                    default:
+                        rc = Z_DATA_ERROR;
+                }
+            }
+        } else if (drec->zlib_initialized) {
             rc = inflate(&drec->stream, Z_NO_FLUSH);
+        } else {
+            // no initialization means previous error on stream
+            return HTP_ERROR;
+        }
+        if (GZIP_BUF_SIZE > drec->stream.avail_out) {
+            if (rc == Z_DATA_ERROR) {
+                // There is data even if there is an error
+                // So use this data and log a warning
+                htp_log(d->tx->connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "GZip decompressor: inflate failed with %d", rc);
+                rc = Z_STREAM_END;
+            }
         }
         if (rc == Z_STREAM_END) {
             // How many bytes do we have?
@@ -268,30 +339,30 @@ restart:
             d2.is_last = d->is_last;
 
             if (drec->super.next != NULL && drec->zlib_initialized) {
-                htp_tx_data_t d3;
-                d3.tx = d->tx;
-                d3.data = drec->buffer;
-                d3.len = len;
-                d3.is_last = d->is_last;
-                return htp_gzip_decompressor_decompress((htp_decompressor_gzip_t *)drec->super.next, &d3);
-
+                callback_rc = htp_gzip_decompressor_decompress((htp_decompressor_gzip_t *)drec->super.next, &d2);
             } else {
                 // Send decompressed data to the callback.
-                htp_status_t callback_rc = drec->super.callback(&d2);
-                if (callback_rc != HTP_OK) {
-                    inflateEnd(&drec->stream);
-                    drec->zlib_initialized = 0;
-
-                    return callback_rc;
-                }
+                callback_rc = drec->super.callback(&d2);
             }
+            if (callback_rc != HTP_OK) {
+                htp_gzip_decompressor_end(drec);
+                return callback_rc;
+            }
+            drec->stream.avail_out = GZIP_BUF_SIZE;
+            drec->stream.next_out = drec->buffer;
             // TODO Handle trailer.
 
             return HTP_OK;
         }
         else if (rc != Z_OK) {
             htp_log(d->tx->connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "GZip decompressor: inflate failed with %d", rc);
-            inflateEnd(&drec->stream);
+            if (drec->zlib_initialized == HTP_COMPRESSION_LZMA) {
+                LzmaDec_Free(&drec->state, &lzma_Alloc);
+                // so as to clean zlib ressources after restart
+                drec->zlib_initialized = HTP_COMPRESSION_NONE;
+            } else {
+                inflateEnd(&drec->stream);
+            }
 
             // see if we want to restart the decompressor
             if (htp_gzip_decompressor_restart(drec,
@@ -313,10 +384,13 @@ restart:
             d2.len = d->len;
             d2.is_last = d->is_last;
 
-            htp_status_t callback_rc = drec->super.callback(&d2);
+            callback_rc = drec->super.callback(&d2);
             if (callback_rc != HTP_OK) {
                 return HTP_ERROR;
             }
+
+            drec->stream.avail_out = GZIP_BUF_SIZE;
+            drec->stream.next_out = drec->buffer;
 
             /* successfully passed through, lets continue doing that */
             drec->passthrough = 1;
@@ -335,10 +409,7 @@ restart:
 static void htp_gzip_decompressor_destroy(htp_decompressor_gzip_t *drec) {
     if (drec == NULL) return;
 
-    if (drec->zlib_initialized) {
-        inflateEnd(&drec->stream);
-        drec->zlib_initialized = 0;
-    }
+    htp_gzip_decompressor_end(drec);
 
     free(drec->buffer);
     free(drec);
@@ -368,19 +439,36 @@ htp_decompressor_t *htp_gzip_decompressor_create(htp_connp_t *connp, enum htp_co
     // Initialize zlib.
     int rc;
 
-    if (format == HTP_COMPRESSION_DEFLATE) {
-        // Negative values activate raw processing,
-        // which is what we need for deflate.
-        rc = inflateInit2(&drec->stream, -15);
-    } else {
-        // Increased windows size activates gzip header processing.
-        rc = inflateInit2(&drec->stream, 15 + 32);
+    switch (format) {
+        case HTP_COMPRESSION_LZMA:
+            if (connp->cfg->lzma_memlimit > 0) {
+                LzmaDec_Construct(&drec->state);
+            } else {
+                htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "LZMA decompression disabled");
+                drec->passthrough = 1;
+            }
+            rc = Z_OK;
+            break;
+        case HTP_COMPRESSION_DEFLATE:
+            // Negative values activate raw processing,
+            // which is what we need for deflate.
+            rc = inflateInit2(&drec->stream, -15);
+            break;
+        case HTP_COMPRESSION_GZIP:
+            // Increased windows size activates gzip header processing.
+            rc = inflateInit2(&drec->stream, 15 + 32);
+            break;
+        default:
+            // do nothing
+            rc = Z_DATA_ERROR;
     }
 
     if (rc != Z_OK) {
         htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0, "GZip decompressor: inflateInit2 failed with code %d", rc);
 
-        inflateEnd(&drec->stream);
+        if (format == HTP_COMPRESSION_DEFLATE || format == HTP_COMPRESSION_GZIP) {
+            inflateEnd(&drec->stream);
+        }
         free(drec->buffer);
         free(drec);
 

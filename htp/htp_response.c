@@ -419,7 +419,7 @@ htp_status_t htp_connp_RES_BODY_CHUNKED_LENGTH(htp_connp_t *connp) {
                 connp->out_tx->response_transfer_coding = HTP_CODING_IDENTITY;
 
                 htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0,
-                        "Response chunk encoding: Invalid chunk length: "PRId64"",
+                        "Response chunk encoding: Invalid chunk length: %"PRId64"",
                         connp->out_chunked_length);
                 return HTP_OK;
             }
@@ -458,6 +458,12 @@ htp_status_t htp_connp_RES_BODY_IDENTITY_CL_KNOWN(htp_connp_t *connp) {
         bytes_to_consume = connp->out_current_len - connp->out_current_read_offset;
     }       
     
+    if (connp->out_status == HTP_STREAM_CLOSED) {
+        connp->out_state = htp_connp_RES_FINALIZE;
+        // Sends close signal to decompressors
+        htp_status_t rc = htp_tx_res_process_body_data_ex(connp->out_tx, NULL, 0);
+        return rc;
+    }
     if (bytes_to_consume == 0) return HTP_DATA;    
 
     // Consume the data.
@@ -470,10 +476,12 @@ htp_status_t htp_connp_RES_BODY_IDENTITY_CL_KNOWN(htp_connp_t *connp) {
     connp->out_stream_offset += bytes_to_consume;
     connp->out_body_data_left -= bytes_to_consume;
 
-    // Have we seen the entire response body?    
+    // Have we seen the entire response body?
     if (connp->out_body_data_left == 0) {
         connp->out_state = htp_connp_RES_FINALIZE;
-        return HTP_OK;
+        // Tells decompressors to output partially decompressed data
+        rc = htp_tx_res_process_body_data_ex(connp->out_tx, NULL, 0);
+        return rc;
     }
 
     return HTP_DATA;
@@ -550,6 +558,9 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
         }
     }
 
+    htp_header_t *cl = htp_table_get_c(connp->out_tx->response_headers, "content-length");
+    htp_header_t *te = htp_table_get_c(connp->out_tx->response_headers, "transfer-encoding");
+
     // Check for "101 Switching Protocol" response.
     // If it's seen, it means that traffic after empty line following headers
     // is no longer HTTP. We can treat it similarly to CONNECT.
@@ -557,18 +568,22 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
     // rather unlikely, so don't try to probe tunnel for nested HTTP,
     // and switch to tunnel mode right away.
     if (connp->out_tx->response_status_number == 101) {
-        connp->out_state = htp_connp_RES_FINALIZE;
+        if (te == NULL && cl == NULL) {
+            connp->out_state = htp_connp_RES_FINALIZE;
 
-        connp->in_status = HTP_STREAM_TUNNEL;
-        connp->out_status = HTP_STREAM_TUNNEL;
+            connp->in_status = HTP_STREAM_TUNNEL;
+            connp->out_status = HTP_STREAM_TUNNEL;
 
-        // we may have response headers
-        htp_status_t rc = htp_tx_state_response_headers(connp->out_tx);
-        return rc;
+            // we may have response headers
+            htp_status_t rc = htp_tx_state_response_headers(connp->out_tx);
+            return rc;
+        } else {
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Switching Protocol with Content-Length");
+        }
     }
 
     // Check for an interim "100 Continue" response. Ignore it if found, and revert back to RES_LINE.
-    if (connp->out_tx->response_status_number == 100) {
+    if (connp->out_tx->response_status_number == 100 && te == NULL && cl == NULL) {
         if (connp->out_tx->seen_100continue != 0) {
             htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0, "Already seen 100-Continue.");
             return HTP_ERROR;
@@ -598,19 +613,26 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
     //  request) is always terminated by the first empty line after the
     //  header fields, regardless of the entity-header fields present in the
     //  message.
-    if (((connp->out_tx->response_status_number >= 100) && (connp->out_tx->response_status_number <= 199))
-            || (connp->out_tx->response_status_number == 204) || (connp->out_tx->response_status_number == 304)
-            || (connp->out_tx->request_method_number == HTP_M_HEAD)) {
-        // There's no response body
+    if (connp->out_tx->request_method_number == HTP_M_HEAD) {
+        // There's no response body whatsoever
         connp->out_tx->response_transfer_coding = HTP_CODING_NO_BODY;
         connp->out_state = htp_connp_RES_FINALIZE;
-    } else {
+    }
+    else if (((connp->out_tx->response_status_number >= 100) && (connp->out_tx->response_status_number <= 199))
+            || (connp->out_tx->response_status_number == 204) || (connp->out_tx->response_status_number == 304)) {
+        // There should be no response body
+        // but browsers interpret content sent by the server as such
+        if (te == NULL && cl == NULL) {
+            connp->out_tx->response_transfer_coding = HTP_CODING_NO_BODY;
+            connp->out_state = htp_connp_RES_FINALIZE;
+        } else {
+            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Unexpected Response body");
+        }
+    }
+    // Hack condition to check that we do not assume "no body"
+    if (connp->out_state != htp_connp_RES_FINALIZE) {
         // We have a response body
-
         htp_header_t *ct = htp_table_get_c(connp->out_tx->response_headers, "content-type");
-        htp_header_t *cl = htp_table_get_c(connp->out_tx->response_headers, "content-length");
-        htp_header_t *te = htp_table_get_c(connp->out_tx->response_headers, "transfer-encoding");
-
         if (ct != NULL) {
             connp->out_tx->response_content_type = bstr_dup_lower(ct->value);
             if (connp->out_tx->response_content_type == NULL) return HTP_ERROR;
@@ -669,9 +691,9 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
             }
 
             // Get body length
-            connp->out_tx->response_content_length = htp_parse_content_length(cl->value);
+            connp->out_tx->response_content_length = htp_parse_content_length(cl->value, connp);
             if (connp->out_tx->response_content_length < 0) {
-                htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0, "Invalid C-L field in response: "PRId64"",
+                htp_log(connp, HTP_LOG_MARK, HTP_LOG_ERROR, 0, "Invalid C-L field in response: %"PRId64"",
                         connp->out_tx->response_content_length);
                 return HTP_ERROR;
             } else {
@@ -727,6 +749,9 @@ htp_status_t htp_connp_RES_BODY_DETERMINE(htp_connp_t *connp) {
  * @returns HTP_OK on state change, HTP_ERROR on error, or HTP_DATA when more data is needed.
  */
 htp_status_t htp_connp_RES_HEADERS(htp_connp_t *connp) {
+    int endwithcr;
+    int lfcrending = 0;
+
     for (;;) {
         if (connp->out_status == HTP_STREAM_CLOSED) {
             // Finalize sending raw trailer data.
@@ -743,14 +768,45 @@ htp_status_t htp_connp_RES_HEADERS(htp_connp_t *connp) {
         OUT_COPY_BYTE_OR_RETURN(connp);
 
         // Have we reached the end of the line?
-        if (connp->out_next_byte == LF || connp->out_next_byte == CR) {
-
+        if (connp->out_next_byte != LF && connp->out_next_byte != CR) {
+            lfcrending = 0;
+        } else {
+            endwithcr = 0;
             if (connp->out_next_byte == CR) {
                 OUT_PEEK_NEXT(connp);
                 if (connp->out_next_byte == -1) {
                     return HTP_DATA_BUFFER;
                 } else if (connp->out_next_byte == LF) {
                     OUT_COPY_BYTE_OR_RETURN(connp);
+                    if (lfcrending) {
+                        // Handling LFCRCRLFCRLF
+                        // These 6 characters mean only 2 end of lines
+                        OUT_PEEK_NEXT(connp);
+                        if (connp->out_next_byte == CR) {
+                            OUT_COPY_BYTE_OR_RETURN(connp);
+                            connp->out_current_consume_offset++;
+                            OUT_PEEK_NEXT(connp);
+                            if (connp->out_next_byte == LF) {
+                                OUT_COPY_BYTE_OR_RETURN(connp);
+                                connp->out_current_consume_offset++;
+                                htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0,
+                                        "Weird response end of lines mix");
+                            }
+                        }
+                    }
+                } else if (connp->out_next_byte == CR) {
+                    continue;
+                }
+                lfcrending = 0;
+                endwithcr = 1;
+            } else {
+                // connp->out_next_byte == LF
+                OUT_PEEK_NEXT(connp);
+                lfcrending = 0;
+                if (connp->out_next_byte == CR) {
+                    // hanldes LF-CR sequence as end of line
+                    OUT_COPY_BYTE_OR_RETURN(connp);
+                    lfcrending = 1;
                 }
             }
 
@@ -759,6 +815,11 @@ htp_status_t htp_connp_RES_HEADERS(htp_connp_t *connp) {
 
             if (htp_connp_res_consolidate_data(connp, &data, &len) != HTP_OK) {
                 return HTP_ERROR;
+            }
+
+            // CRCRLF is not an empty line
+            if (endwithcr && len < 2) {
+                continue;
             }
 
             #ifdef HTP_DEBUG
@@ -842,10 +903,31 @@ htp_status_t htp_connp_RES_HEADERS(htp_connp_t *connp) {
                     connp->out_header = bstr_dup_mem(data, len);
                     if (connp->out_header == NULL) return HTP_ERROR;
                 } else {
-                    // Add to the existing header.                    
-                    bstr *new_out_header = bstr_add_mem(connp->out_header, data, len);
-                    if (new_out_header == NULL) return HTP_ERROR;
-                    connp->out_header = new_out_header;
+                    size_t colon_pos = 0;
+                    while ((colon_pos < len) && (data[colon_pos] != ':')) colon_pos++;
+
+                    if (colon_pos < len &&
+                        bstr_chr(connp->out_header, ':') >= 0 &&
+                        connp->out_tx->response_protocol_number == HTP_PROTOCOL_1_1) {
+                        // Warn only once per transaction.
+                        if (!(connp->out_tx->flags & HTP_INVALID_FOLDING)) {
+                            connp->out_tx->flags |= HTP_INVALID_FOLDING;
+                            htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Invalid response field folding");
+                        }
+                        if (connp->cfg->process_response_header(connp, bstr_ptr(connp->out_header),
+                            bstr_len(connp->out_header)) != HTP_OK)
+                            return HTP_ERROR;
+                        bstr_free(connp->out_header);
+                        connp->out_header = bstr_dup_mem(data+1, len-1);
+                        if (connp->out_header == NULL)
+                            return HTP_ERROR;
+                    } else {
+                        // Add to the existing header.
+                        bstr *new_out_header = bstr_add_mem(connp->out_header, data, len);
+                        if (new_out_header == NULL)
+                            return HTP_ERROR;
+                        connp->out_header = new_out_header;
+                    }
                 }
             }
 
@@ -873,6 +955,15 @@ htp_status_t htp_connp_RES_LINE(htp_connp_t *connp) {
         // Have we reached the end of the line? We treat stream closure as end of line in
         // order to handle the case when the first line of the response is actually response body
         // (and we wish it processed as such).
+        if (connp->out_next_byte == CR) {
+            OUT_PEEK_NEXT(connp);
+            if (connp->out_next_byte == -1) {
+                return HTP_DATA_BUFFER;
+            } else if (connp->out_next_byte == LF) {
+                continue;
+            }
+            connp->out_next_byte = LF;
+        }
         if ((connp->out_next_byte == LF)||(connp->out_status == HTP_STREAM_CLOSED)) {
             unsigned char *data;
             size_t len;
@@ -887,6 +978,9 @@ htp_status_t htp_connp_RES_LINE(htp_connp_t *connp) {
 
             // Is this a line that should be ignored?
             if (htp_connp_is_line_ignorable(connp, data, len)) {
+                if (connp->out_status == HTP_STREAM_CLOSED) {
+                    connp->out_state = htp_connp_RES_FINALIZE;
+                }
                 // We have an empty/whitespace line, which we'll note, ignore and move on
                 connp->out_tx->response_ignored_lines++;
 
@@ -931,29 +1025,21 @@ htp_status_t htp_connp_RES_LINE(htp_connp_t *connp) {
             if (htp_treat_response_line_as_body(data, len)) {
                 connp->out_tx->response_content_encoding_processing = HTP_COMPRESSION_NONE;
 
+                connp->out_current_consume_offset = connp->out_current_read_offset;
                 htp_status_t rc = htp_tx_res_process_body_data_ex(connp->out_tx, data, len + chomp_result);
                 if (rc != HTP_OK) return rc;
 
                 // Continue to process response body. Because we don't have
                 // any headers to parse, we assume the body continues until
                 // the end of the stream.
-                connp->out_tx->response_transfer_coding = HTP_CODING_IDENTITY;
-                connp->out_tx->response_progress = HTP_RESPONSE_BODY;
-                connp->out_state = htp_connp_RES_BODY_IDENTITY_STREAM_CLOSE;               
-                connp->out_body_data_left = -1;
 
-                // Clean response line allocations when processed as body
-                bstr_free(connp->out_tx->response_line);
-                connp->out_tx->response_line = NULL;
-
-                bstr_free(connp->out_tx->response_protocol);
-                connp->out_tx->response_protocol = NULL;
-
-                bstr_free(connp->out_tx->response_status);
-                connp->out_tx->response_status = NULL;
-
-                bstr_free(connp->out_tx->response_message);
-                connp->out_tx->response_message = NULL;
+                // Have we seen the entire response body?
+                if (connp->out_current_len <= connp->out_current_read_offset) {
+                    connp->out_tx->response_transfer_coding = HTP_CODING_IDENTITY;
+                    connp->out_tx->response_progress = HTP_RESPONSE_BODY;
+                    connp->out_body_data_left = -1;
+                    connp->out_state = htp_connp_RES_FINALIZE;
+                }
 
                 return HTP_OK;
             }
@@ -984,6 +1070,21 @@ size_t htp_connp_res_data_consumed(htp_connp_t *connp) {
 }
 
 htp_status_t htp_connp_RES_FINALIZE(htp_connp_t *connp) {
+    int bytes_left = connp->out_current_len - connp->out_current_read_offset;
+    unsigned char * data = connp->out_current_data + connp->out_current_read_offset;
+
+    if (bytes_left > 0 &&
+        htp_treat_response_line_as_body(data, bytes_left)) {
+        // Interpret remaining bytes as body data
+        htp_log(connp, HTP_LOG_MARK, HTP_LOG_WARNING, 0, "Unexpected response body");
+        connp->out_current_read_offset += bytes_left;
+        connp->out_current_consume_offset += bytes_left;
+        connp->out_stream_offset += bytes_left;
+        connp->out_body_data_left -= bytes_left;
+        htp_status_t rc = htp_tx_res_process_body_data_ex(connp->out_tx, data, bytes_left);
+        return rc;
+    }
+
     return htp_tx_state_response_complete_ex(connp->out_tx, 0 /* not hybrid mode */);
 }
 

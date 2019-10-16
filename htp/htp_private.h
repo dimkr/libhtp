@@ -61,6 +61,7 @@ extern "C" {
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <stdint.h>
 
 #include "htp_config_auto_gen.h"
 #include "htp.h"
@@ -78,6 +79,12 @@ extern "C" {
 #ifndef LF
 #define LF '\n'
 #endif
+
+// 1048576 is 1 Mbyte
+#define HTP_LZMA_MEMLIMIT                   1048576
+//deflate max ratio is about 1000
+#define HTP_COMPRESSION_BOMB_RATIO          2048
+#define HTP_COMPRESSION_BOMB_LIMIT          1048576
 
 #define HTP_FIELD_LIMIT_HARD               18000
 #define HTP_FIELD_LIMIT_SOFT               9000
@@ -173,7 +180,7 @@ void htp_normalize_uri_path_inplace(bstr *s);
 void htp_utf8_decode_path_inplace(htp_cfg_t *cfg, htp_tx_t *tx, bstr *path);
 void htp_utf8_validate_path(htp_tx_t *tx, bstr *path);
 
-int64_t htp_parse_content_length(bstr *b);
+int64_t htp_parse_content_length(bstr *b, htp_connp_t *connp);
 int64_t htp_parse_chunked_length(unsigned char *data, size_t len);
 int64_t htp_parse_positive_integer_whitespace(unsigned char *data, size_t len, int base);
 int htp_parse_status(bstr *status);
